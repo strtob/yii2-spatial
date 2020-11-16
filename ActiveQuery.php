@@ -38,7 +38,8 @@ class ActiveQuery extends YiiActiveQuery {
      * @link https://en.wikipedia.org/wiki/Haversine_formula
      * @link https://stackoverflow.com/questions/28254863/mysql-geospacial-search-using-haversine-formula-returns-null-on-same-point (thanks: fpolito)
      */
-    public function nearest($from, $attribute, $radius = 100)    {
+    public function nearest($from, $attribute, $radius = 100)
+    {
         $lenPerDegree = 111.045;    // km per degree latitude; for miles, use 69.0
 
         if (is_string($from))   {
@@ -97,7 +98,8 @@ class ActiveQuery extends YiiActiveQuery {
      * @param $db
      * @return bool|false|string|null
      */
-    protected function queryScalar($selectExpression, $db)  {
+    protected function queryScalar($selectExpression, $db)
+    {
         $this->_skipPrep = true;
         $r = parent::queryScalar($selectExpression, $db);
         $this->_skipPrep = false;
@@ -109,24 +111,24 @@ class ActiveQuery extends YiiActiveQuery {
      * @return YiiActiveQuery|\yii\db\Query
      * @throws \yii\base\InvalidConfigException
      */
-    public function prepare($builder)    {
-        if (! $this->_skipPrep) {   // skip in case of queryScalar; it's not needed, and we get an SQL error (duplicate column names)
-            if (empty($this->select))   {
-                $this->select('*');
-                $this->allColumns();
-            }
-            else   {
+    public function prepare($builder)
+    {
+        if (!$this->_skipPrep) {   // skip in case of queryScalar; it's not needed, and we get an SQL error (duplicate column names)
+            list(, $alias) = $this->getTableNameAndAlias();
+            if (empty($this->select)) {
+                $this->select("$alias.*");
+                $this->allColumns($alias);
+            } else {
                 /** @var ActiveRecord $modelClass */
                 $modelClass = $this->modelClass;
                 $schema = $modelClass::getTableSchema();
-                foreach ($this->select as $field)   {
-                    if ($field == '*')  {
-                        $this->allColumns();
-                    }
-                    else {
+                foreach ($this->select as $field) {
+                    if ($field == '*') {
+                        $this->allColumns($alias);
+                    } else {
                         $column = $schema->getColumn($field);
                         if (ActiveRecord::isSpatial($column)) {
-                            $this->addSelect(["ST_AsText($field) AS $field"]);
+                            $this->addSelect(["ST_AsText($alias.$field) AS $field"]);
                         }
                     }
                 }
@@ -138,15 +140,45 @@ class ActiveQuery extends YiiActiveQuery {
     /**
      * @throws \yii\base\InvalidConfigException
      */
-    protected function allColumns() {
+    protected function allColumns($alias)
+    {
         /** @var ActiveRecord $modelClass */
         $modelClass = $this->modelClass;
         $schema = $modelClass::getTableSchema();
-        foreach ($schema->columns as $column)   {
+        foreach ($schema->columns as $column) {
             if (ActiveRecord::isSpatial($column)) {
                 $field = $column->name;
-                $this->addSelect(["ST_AsText($field) AS $field"]);
+                $this->addSelect(["AsText($alias.$field) AS $field"]);
             }
         }
+    }
+    
+    /**
+     * Returns the table name and the table alias for [[modelClass]].
+     * @return array the table name and the table alias.
+     * @internal
+     */
+    private function getTableNameAndAlias()
+    {
+        if (empty($this->from)) {
+            $tableName = $this->getPrimaryTableName();
+        } else {
+            $tableName = '';
+            foreach ($this->from as $alias => $tableName) {
+                if (is_string($alias)) {
+                    return [$tableName, $alias];
+                } else {
+                    break;
+                }
+            }
+        }
+
+        if (preg_match('/^(.*?)\s+({{\w+}}|\w+)$/', $tableName, $matches)) {
+            $alias = $matches[2];
+        } else {
+            $alias = $tableName;
+        }
+
+        return [$tableName, $alias];
     }
 }
