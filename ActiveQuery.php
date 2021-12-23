@@ -57,7 +57,7 @@ class ActiveQuery extends YiiActiveQuery {
 
         $subQuery = $this->create($this)->from($modelCls::tableName())
             ->select([
-                '*',
+                $modelCls::tableName().'.*',
                 '_lng' => "ST_X({$attribute})",
                 '_lat' => "ST_Y({$attribute})",
             ])
