@@ -1,8 +1,8 @@
 <?php
 /**
  * MIT licence
- * Version 1.1.1
- * Sjaak Priester, Amsterdam 21-06-2014 ... 19-05-2019.
+ * Version 1.1.0
+ * Sjaak Priester, Amsterdam 21-06-2014 ... 02-04-2019.
  *
  * ActiveRecord with spatial attributes in Yii 2.0 framework
  *
@@ -11,174 +11,132 @@
 
 namespace sjaakp\spatial;
 
-use yii\db\ActiveQuery as YiiActiveQuery;
+use Yii;
+use yii\db\Expression;
+use yii\helpers\Json;
+use yii\db\ActiveRecord as YiiActiveRecord;
+use yii\base\InvalidCallException;
 
 /**
- * Class ActiveQuery
+ * Class ActiveRecord
  * @package sjaakp\spatial
  */
-class ActiveQuery extends YiiActiveQuery {
+class ActiveRecord extends YiiActiveRecord {
+    /** @var  float - virtual attribute used by ActiveQuery::nearest() */
+    public $_d;
 
     /**
-     * @param $from - string|array
-     *      string: GeoJson representation of POINT
-     *      array:  location in the form [ <lng>, <lat> ] (two floats)
-     * @param $attribute - attribute name of POINT
-     * @param $radius number - search radius in kilometers
-     * @return $this - query that returns models that are near to $from
-     *
-     * Example usages:
-     * $here = [4.9, 52.3];     // longitude and latitude of my place
-     * $nearestModel = <model>::find()->nearest($here, <attributeName>, 100)->one();    // search radius is 100 km
-     * $fiveNearestModels =  <model>::find()->nearest($here, <attributeName>, 100)->limit(5)->all();
-     * $dataProvider = new ActiveDataProvider([ 'query' => <model>::find()->nearest($here, <attributeName>, 100) ]);
-     *
-     *
-     * @link http://www.plumislandmedia.net/mysql/haversine-mysql-nearest-loc/
-     * @link https://en.wikipedia.org/wiki/Haversine_formula
-     * @link https://stackoverflow.com/questions/28254863/mysql-geospacial-search-using-haversine-formula-returns-null-on-same-point (thanks: fpolito)
-     */
-    public function nearest($from, $attribute, $radius = 100)
-    {
-        $lenPerDegree = 111.045;    // km per degree latitude; for miles, use 69.0
-
-        if (is_string($from))   {
-            $feat = SpatialHelper::jsonToGeom($from);
-            if ($feat && $feat['type'] == 'Point') $from = $feat['coordinates'];
-        }
-        if (! is_array($from)) return $this;
-        $lng = $from[0];
-        $lat = $from[1];
-
-        $dLat = $radius / $lenPerDegree;
-        $dLng = $dLat / cos(deg2rad($lat));
-
-        /** @var \yii\db\ActiveRecord $modelCls */
-        $modelCls = $this->modelClass;
-
-        $subQuery = $this->create($this)->from($modelCls::tableName())
-            ->select([
-                '*',
-                '_lng' => "ST_X({$attribute})",
-                '_lat' => "ST_Y({$attribute})",
-            ])
-            ->having([ 'between', '_lng', $lng - $dLng, $lng + $dLng ])
-            ->andHaving([ 'between', '_lat', $lat - $dLat, $lat + $dLat ]);
-
-        $this->from([$subQuery])
-            ->select([
-                '*',
-//                '_d' => "SQRT(POW(_lng-:lg,2)+POW(_lat-:lt,2))*{$lenPerDeg}"    // Pythagoras
-                '_d' => "{$lenPerDegree}*DEGREES( IFNULL(ACOS(COS(RADIANS(:lt))*COS(RADIANS(_lat))*COS(RADIANS(:lg)-RADIANS(_lng))+SIN(RADIANS(:lt))*SIN(RADIANS(_lat))),0))"  // Haversine
-            ])
-            ->params([
-                ':lg' => $lng,
-                ':lt' => $lat
-            ])
-            ->having([ '<', '_d', $radius ])
-            ->orderBy([
-                '_d' => SORT_ASC
-            ]);
-
-        $this->where = null;
-        $this->limit = null;
-        $this->offset = null;
-        $this->distinct = null;
-        $this->groupBy = null;
-        $this->join = null;
-        $this->union = null;
-
-        return $this;
-    }
-
-    protected $_skipPrep = false;
-
-    /**
-     * @param $selectExpression
-     * @param $db
-     * @return bool|false|string|null
-     */
-    protected function queryScalar($selectExpression, $db)
-    {
-        $this->_skipPrep = true;
-        $r = parent::queryScalar($selectExpression, $db);
-        $this->_skipPrep = false;
-        return $r;
-    }
-
-    /**
-     * @param $builder
-     * @return YiiActiveQuery|\yii\db\Query
+     * @return object|\yii\db\ActiveQuery
      * @throws \yii\base\InvalidConfigException
      */
-    public function prepare($builder)
-    {
-        if (!$this->_skipPrep) {   // skip in case of queryScalar; it's not needed, and we get an SQL error (duplicate column names)
-            list(, $alias) = $this->getTableNameAndAlias();
-            if (empty($this->select)) {
-                $this->select("$alias.*");
-                $this->allColumns($alias);
-            } else {
-                /** @var ActiveRecord $modelClass */
-                $modelClass = $this->modelClass;
-                $schema = $modelClass::getTableSchema();
-                foreach ($this->select as $field) {
-                    if ($field == '*') {
-                        $this->allColumns($alias);
-                    } else {
-                        $column = $schema->getColumn($field);
-                        if (ActiveRecord::isSpatial($column)) {
-                            $this->addSelect(["ST_AsText($alias.$field) AS $field"]);
-                        }
+    public static function find()    {
+        return Yii::createObject(ActiveQuery::class, [get_called_class()]);
+    }
+
+    public static function isSpatial($column)   {
+        $spatialFields = [
+            'point',
+            'linestring',
+            'polygon',
+            'multipoint',
+            'multilinestring',
+            'multipolygon',
+            'geometry',
+            'geometrycollection'
+        ];
+
+        return $column ? in_array($column->dbType, $spatialFields) : false;
+    }
+
+    protected $_saved = [];
+
+    /**
+     * @param bool $insert
+     * @return bool
+     * @throws \yii\base\InvalidConfigException
+     */
+    public function beforeSave($insert)    {
+        $r = parent::beforeSave($insert);
+        if ($r) {
+            $scheme = static::getTableSchema();
+            foreach ($scheme->columns as $column)   {
+                if (static::isSpatial($column))   {
+                    $field = $column->name;
+                    $attr = $this->getAttribute($field);
+
+                    if ($attr)  {
+                        $this->_saved[$field] = $attr;
+                        $feature = Json::decode($attr);
+                        $wkt = SpatialHelper::featureToWkt($feature);
+                        $this->setAttribute($field, new Expression("ST_GeomFromText('$wkt')"));
                     }
                 }
             }
         }
-        return parent::prepare($builder);
+        return $r;
+    }
+
+    /**
+     * @param bool $insert
+     * @param array $changedAttributes
+     */
+    public function afterSave($insert, $changedAttributes)    {
+        foreach ($this->_saved as $field => $attr)
+            $this->setAttribute($field, $attr);
+        parent::afterSave($insert, $changedAttributes);
     }
 
     /**
      * @throws \yii\base\InvalidConfigException
      */
-    protected function allColumns($alias)
-    {
-        /** @var ActiveRecord $modelClass */
-        $modelClass = $this->modelClass;
-        $schema = $modelClass::getTableSchema();
-        foreach ($schema->columns as $column) {
-            if (ActiveRecord::isSpatial($column)) {
+    public function afterFind()    {
+        parent::afterFind();
+
+        $scheme = static::getTableSchema();
+        foreach ($scheme->columns as $column)   {
+            if (static::isSpatial($column))   {
                 $field = $column->name;
-                $this->addSelect(["AsText($alias.$field) AS $field"]);
-            }
-        }
-    }
-    
-    /**
-     * Returns the table name and the table alias for [[modelClass]].
-     * @return array the table name and the table alias.
-     * @internal
-     */
-    protected function getTableNameAndAlias()
-    {
-        if (empty($this->from)) {
-            $tableName = $this->getPrimaryTableName();
-        } else {
-            $tableName = '';
-            foreach ($this->from as $alias => $tableName) {
-                if (is_string($alias)) {
-                    return [$tableName, $alias];
-                } else {
-                    break;
+                $attr = $this->getAttribute($field);    // get WKT
+                if ($attr)  {
+                    if (YII_DEBUG && preg_match( '/[\\x80-\\xff]+/' , $attr ))   {
+                        /* If you get an exception here, it probably means you have overridden find()
+                             and did not return sjaakp\spatial\ActiveQuery. */
+                        throw new InvalidCallException('Spatial attribute not converted.');
+                    }
+                    $geom = SpatialHelper::wktToGeom($attr);
+
+                    // Transform geometry FeatureCollection...
+                    if ($geom['type'] == 'GeometryCollection')  {
+                        $feats = [];
+                        foreach ($geom['geometries'] as $g) {
+                            $feats[] = [
+                                'type' => 'Feature',
+                                'geometry' => $g,
+                                'properties' => $this->featureProperties($field, $g)
+                            ];
+                        }
+                        $feature = [
+                            'type' => 'FeatureCollection',
+                            'features' => $feats
+                        ];
+                    }
+                    else {  // ... or to Feature
+                        $feature = SpatialHelper::geomToFeature($geom, $this->featureProperties($field, $geom));
+                    }
+
+                    $this->setAttribute($field, Json::encode($feature));
                 }
             }
         }
+    }
 
-        if (preg_match('/^(.*?)\s+({{\w+}}|\w+)$/', $tableName, $matches)) {
-            $alias = $matches[2];
-        } else {
-            $alias = $tableName;
-        }
-
-        return [$tableName, $alias];
+    /**
+     * Override this function to set more Feature properties
+     * @param $field
+     * @param $geometry
+     * @return array
+     */
+    public function featureProperties($field, $geometry)  {
+        return [ 'id' => $this->getPrimaryKey() ];
     }
 }
